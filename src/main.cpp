@@ -1,10 +1,34 @@
 #include <Arduino.h>
 #include "Config.h"
 
-// Line Sensors
-const int irLineLeft = 4;
-const int irLineRight = 2;
+// ==================================================
+// Sensors (A1-A5 only for line)
+// ==================================================
+const uint8_t sensorPins[] = {
+    irLine_PIN1,
+    irLine_PIN2,
+    irLine_PIN3,
+    irLine_PIN4,
+    irLine_PIN5};
 
+const int SENSOR_COUNT = 5;
+
+// reversed weights (fix direction)
+int weights[] = {3, 2, 0, -2, -3};
+
+// ==================================================
+// PID Constants
+// ==================================================
+float Kp = 22;
+float Ki = 0.8; // NEW (small on purpose)
+float Kd = 18;
+
+float integral = 0;
+float lastError = 0;
+
+int baseSpeed = 120;
+
+// ==================================================
 void setup()
 {
   pinMode(motorRF, OUTPUT);
@@ -12,82 +36,109 @@ void setup()
   pinMode(motorLF, OUTPUT);
   pinMode(motorLB, OUTPUT);
 
-  pinMode(irLineLeft, INPUT);
-  pinMode(irLineRight, INPUT);
+  for (int i = 0; i < SENSOR_COUNT; i++)
+    pinMode(sensorPins[i], INPUT);
+
+  pinMode(irLine_PIN, INPUT); // obstacle
 }
 
-// --- Smooth Direction Functions using PWM ---
-
-void moveForward()
+// ==================================================
+// Read line position
+// ==================================================
+float readLineError()
 {
-  analogWrite(motorRF, moveSpeed);
-  analogWrite(motorLF, moveSpeed);
-  analogWrite(motorRB, 0);
-  analogWrite(motorLB, 0);
-}
+  long sum = 0;
+  int count = 0;
 
-void turnLeft()
-{
-  // Differential Turn: Left back, Right forward
-  analogWrite(motorLB, turnSpeed);
-  analogWrite(motorRF, turnSpeed);
-  analogWrite(motorLF, 0);
-  analogWrite(motorRB, 0);
-}
-
-void turnRight()
-{
-  // Differential Turn: Right back, Left forward
-  analogWrite(motorRB, turnSpeed);
-  analogWrite(motorLF, turnSpeed);
-  analogWrite(motorRF, 0);
-  analogWrite(motorLB, 0);
-}
-
-void stopRobot()
-{
-  analogWrite(motorRF, 0);
-  analogWrite(motorLF, 0);
-  analogWrite(motorRB, 0);
-  analogWrite(motorLB, 0);
-}
-
-// --- Improved Line Follower Logic ---
-
-void lineFollowerMode()
-{
-  while (true)
+  for (int i = 0; i < SENSOR_COUNT; i++)
   {
-    int leftVal = digitalRead(irLineLeft);
-    int rightVal = digitalRead(irLineRight);
+    if (digitalRead(sensorPins[i]) == HIGH)
+    {
+      sum += weights[i];
+      count++;
+    }
+  }
 
-    if (leftVal == LOW && rightVal == LOW)
-    {
-      moveForward(); // Both sensors on white
-    }
-    else if (leftVal == HIGH && rightVal == LOW)
-    {
-      turnLeft(); // Left sensor on black line, turn left smoothly
-    }
-    else if (leftVal == LOW && rightVal == HIGH)
-    {
-      turnRight(); // Right sensor on black line, turn right smoothly
-    }
-    else
-    {
-      stopRobot(); // Both on black (Stop or Intersection)
-    }
+  if (count == 0)
+    return lastError;
+
+  return (float)sum / count;
+}
+
+// ==================================================
+// Obstacle handling (A0)
+// ==================================================
+bool obstacleDetected()
+{
+  return digitalRead(irLine_PIN) == HIGH;
+}
+
+// ==================================================
+void moveSmoothly(int left, int right)
+{
+  left = constrain(left, -255, 255);
+  right = constrain(right, -255, 255);
+
+  // Left
+  if (left >= 0)
+  {
+    analogWrite(motorLF, left);
+    analogWrite(motorLB, 0);
+  }
+  else
+  {
+    analogWrite(motorLF, 0);
+    analogWrite(motorLB, -left);
+  }
+
+  // Right
+  if (right >= 0)
+  {
+    analogWrite(motorRF, right);
+    analogWrite(motorRB, 0);
+  }
+  else
+  {
+    analogWrite(motorRF, 0);
+    analogWrite(motorRB, -right);
   }
 }
 
+// ==================================================
+void stopRobot()
+{
+  analogWrite(motorRF, 0);
+  analogWrite(motorRB, 0);
+  analogWrite(motorLF, 0);
+  analogWrite(motorLB, 0);
+}
+
+// ==================================================
 void loop()
 {
-  moveForward();
-  delay(2000);
-  void stopRobot();
-  delay(2000);
-  turnLeft();
-  delay(2000);
-  turnRight();
-  delay(2000);
+  // --------- OBSTACLE MODE ----------
+  if (obstacleDetected())
+  {
+    stopRobot();
+    return; // skip PID
+  }
+
+  // --------- PID CONTROL ------------
+  float error = readLineError();
+
+  // Integral (anti-windup clamp)
+  integral += error;
+  integral = constrain(integral, -50, 50);
+
+  float correction =
+      (Kp * error) +
+      (Ki * integral) +
+      (Kd * (error - lastError));
+
+  lastError = error;
+
+  int leftSpeed = baseSpeed + correction;
+  int rightSpeed = baseSpeed - correction;
+
+  moveSmoothly(leftSpeed, rightSpeed);
 }
